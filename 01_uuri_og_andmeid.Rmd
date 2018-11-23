@@ -1,0 +1,181 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Uuri random numbri andmisel genereeritud numbreid
+
+```{r}
+library(tidyverse)
+library(iptools)
+library(hrbrthemes)
+
+failid_raw  <- list.files("~/Dropbox/DataScience/R/random_number/data/random_1/", full.names = TRUE)
+```
+
+Funktsioon, mis laeb tabelisse random numbri valiku ja faili nimest timestampi
+```{r}
+read_random_number <- function(x){
+  timestamp <- as.numeric(str_extract(x, "\\d{10}"))
+  
+  df <- read_rds(x) %>% 
+    mutate(timestamp = timestamp)
+}
+```
+
+Lae andmed tabelisse
+```{r}
+random_numbrid_raw <- map_df(failid_raw, read_random_number)
+```
+
+
+```{r}
+glimpse(random_numbrid_raw)
+```
+
+Unikaalsed ip-aadressid
+```{r}
+random_numbrid_raw %>% 
+  group_by(ip) %>% 
+  summarise(sessioone = n_distinct(session_id),
+            numbreid = n()) %>% 
+  arrange(desc(sessioone))
+```
+
+Kui palju numbreid lisati sessioonide lõikes?
+```{r}
+random_numbrid_raw %>% 
+  group_by(session_id) %>% 
+  summarise(numbreid = n()) %>% 
+  arrange(desc(numbreid))
+```
+
+Leia ip-aadressist hostname
+```{r}
+ip <- random_numbrid_raw %>% 
+  distinct(ip) %>% 
+  pull(ip)
+
+parse_hostname <- function(x){
+  hostname <- ip_to_hostname(x)[[1]]
+  
+  tibble(ip = x,
+         hostname)
+}
+
+
+ip_with_hostname <- map_df(ip, parse_hostname)
+```
+
+
+Tutvu hostname väärtustega
+```{r}
+ip_with_hostname %>% 
+  mutate(host = str_extract(hostname, "[a-z]*.[a-z]*.ee$"),
+         host = str_replace(host, "^\\.", "")) %>% 
+  count(host)
+```
+
+Töötle andmedi:
+  - eralda host hostname-st
+  - timestampist date time
+  - genereeri unikaalne kasutaja id. Kui ühe IP aadressi tagant on tehtud mitu sessioonid, siis on üks kasutja. Erand on edu.estpak.ee, mis on kooli wifi.
+```{r}
+random_numbrid <- random_numbrid_raw %>% 
+  left_join(ip_with_hostname, by = "ip") %>% 
+  mutate(host = str_extract(hostname, "[a-z]*.[a-z]*.ee$"),
+         host = str_replace(host, "^\\.", ""),
+         date_time = as.POSIXct(timestamp, origin = "1970-01-01"),
+         user_id = case_when(host == "edu.estpak.ee" ~ session_id,
+                             TRUE ~ ip))
+
+glimpse(random_numbrid)
+```
+
+Salvesta töödeldud andmed nii, et seda mujal kasutada.
+```{r}
+write_rds(random_numbrid, path = "output/random_numbrid.rds")
+```
+
+
+Kui palju unikaalseid kasutajaid oma valiku tegid?
+```{r}
+random_numbrid %>% 
+  summarise(n_distinct(user_id))
+```
+
+Kuidas jaotuvad kasutajad selle põhjal kui mitu numbrit valiti?
+```{r}
+random_numbrid %>% 
+  count(user_id) %>% 
+  ggplot((aes(n))) +
+  geom_histogram(binwidth = 1)
+```
+
+Milliseid operaatoreid kasutatakse
+```{r}
+random_numbrid %>% 
+  filter(host != "edu.estpak.ee") %>% 
+  mutate(operaator = case_when(host == "dyn.estpak.ee" ~ "telia",
+                               host == "tele2.ee" ~ "tele2",
+                               TRUE ~ "elisa")) %>% 
+  distinct(operaator, user_id) %>% 
+  count(operaator) %>% 
+  mutate(osakaal = n / sum(n))
+```
+
+Kuna kasutajad valisid väga erineva arvu numbreid, siis jäta alles ainult need, kes tegeid vähemalt 3 valikut. Igalt vastajalt jäta alles juhuslikud 3 vastust. Juhuslik valim võta välja 6 korda ja kirjuta andmed tabelisse, et need hiljem visualiseerida.
+```{r}
+genereeri_andmed <- function(x){
+  set.seed(x)
+  
+  random_numbrid %>% 
+    group_by(user_id) %>% 
+    mutate(vastuseid = n()) %>% 
+    filter(vastuseid >= 3) %>% 
+    sample_n(3) %>% 
+    ungroup() %>% 
+    mutate(sample = x) %>% 
+    select(sample, value, user_id)
+}
+
+genereeritud_andmed <- map_df(seq(1, 6, by = 1), genereeri_andmed)
+```
+
+Visualiseeri tulemused nii, et igalt vastajalt on valitud 3 juhuslikku numbrit ja tulemused kuvada 6-l graafikul. See vähendab nende inimeste suure mõju tulemustele, kes valisid palju numbreid.
+```{r fig.height=7, fig.width=8}
+genereeritud_andmed %>% 
+  group_by(sample, value) %>% 
+  summarise(n = n()) %>% 
+  group_by(sample) %>% 
+  mutate(osakaal = n / sum(n)) %>% 
+  ungroup() %>% 
+  mutate(sample = str_c(sample, ". valim")) %>% 
+  ggplot(aes(as.factor(value), osakaal)) +
+  geom_col(fill = "#2b8cbe") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  # geom_text(aes(label = n), vjust = -0.3) +
+  theme_ipsum_rc() +
+  facet_wrap(~ sample, ncol = 2) +
+  labs(title = "Juhuslikult valitud number vahemikus 1-10",
+       subtitle = "kuus korda kolm juhuslikku numbrit igalt vastajalt",
+       x = "valitud number",
+       y = "valiku %")
+```
+
+Milliseid numbreid kõige rohkem valiti?
+```{r}
+random_numbrid %>%
+  count(value) %>% 
+  mutate(osakaal = n / sum(n)) %>% 
+  ggplot(aes(as.factor(value), osakaal)) +
+  geom_col(fill = "#2b8cbe") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  # geom_text(aes(label = n), vjust = -0.3) +
+  theme_ipsum_rc() +
+  labs(title = "Juhuslikult valitud number vahemikus 1-10",
+       subtitle = "130 vastaja poolt valitud 1152 numbrit",
+       x = "valitud number",
+       y = "valiku %")
+```
+
